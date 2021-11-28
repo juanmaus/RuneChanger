@@ -1,6 +1,7 @@
 # RuneChanger [![Chat](https://img.shields.io/discord/593147882496851978.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://discord.gg/9tEsjhj)
 
 RuneChanger is an app that improves and speeds up the use of LoL client.
+This fork only exists to keep an up-to date version with auto-accept queue capability
 
 [![Video](https://upload.wikimedia.org/wikipedia/commons/thumb/e/e1/YouTube_play_buttom_icon_%282013-2017%29.svg/200px-YouTube_play_buttom_icon_%282013-2017%29.svg.png)](https://www.youtube.com/watch?v=ScsoHfm1vgE)
 
