@@ -6,10 +6,12 @@ import com.stirante.eventbus.Subscribe;
 import com.stirante.lolclient.ApiResponse;
 import com.stirante.lolclient.ClientApi;
 import com.stirante.runechanger.DebugConsts;
+import com.stirante.runechanger.RuneChanger;
 import com.stirante.runechanger.model.client.Champion;
 import com.stirante.runechanger.model.client.GameMap;
 import com.stirante.runechanger.model.client.GameMode;
 import com.stirante.runechanger.model.client.SummonerSpell;
+import com.stirante.runechanger.sourcestore.TeamCompAnalyzer;
 import com.stirante.runechanger.util.AnalyticsUtil;
 import com.stirante.runechanger.util.SimplePreferences;
 import generated.*;
@@ -27,13 +29,18 @@ public class ChampionSelection extends ClientModule {
     private Champion champion;
     private GameMode gameMode;
     private boolean positionSelector;
-    private ArrayList<Champion> banned = new ArrayList<>();
+    private final ArrayList<Champion> banned = new ArrayList<>();
     private Map<String, Object> banAction;
+    private final Map<Position, Champion> allyTeam = new HashMap<>();
+    private final List<Champion> enemyTeam = new ArrayList<>();
+    private Position selectedPosition;
     private GameMap map;
     private String currentPhase = "";
     private long phaseEnd = 0L;
     private int skinId = 0;
     private long wardSkinId = 0;
+    private String chatRoomName;
+    private final TeamCompAnalyzer teamCompAnalyzer = new TeamCompAnalyzer();
 
     public ChampionSelection(ClientApi api) {
         super(api);
@@ -108,9 +115,19 @@ public class ChampionSelection extends ClientModule {
         }
     }
 
+    public Map<Position, Champion> getAllyTeam() {
+        return allyTeam;
+    }
+
+    public List<Champion> getEnemyTeam() {
+        return enemyTeam;
+    }
+
     @SuppressWarnings("unchecked")
-    private void findCurrentAction(LolChampSelectChampSelectSession session) {
+    private void processActions(LolChampSelectChampSelectSession session) {
         banned.clear();
+        enemyTeam.clear();
+        allyTeam.clear();
         banAction = null;
         //we need to find summoner's cell id
         LolChampSelectChampSelectPlayerSelection self =
@@ -124,18 +141,34 @@ public class ChampionSelection extends ClientModule {
                 for (Object action : ((List) actions)) {
                     Map<String, Object> a = (Map<String, Object>) action;
                     //no idea why, but cell id gets recognized here as Double
-                    if (((Double) a.get("actorCellId")).intValue() == self.cellId.intValue() &&
-                            a.get("type").equals("pick")) {
-                        this.action = a;
+                    int actorCellId = ((Double) a.get("actorCellId")).intValue();
+                    String type = String.valueOf(a.get("type"));
+                    if (type.equals("pick")) {
+                        if (actorCellId == self.cellId.intValue()) {
+                            this.action = a;
+                        }
+                        else if (session.theirTeam.stream()
+                                .anyMatch(player -> player.cellId.intValue() == actorCellId)) {
+                            this.enemyTeam.add(Champion.getById(((Double) a.get("championId")).intValue()));
+                        }
+                        else if (session.myTeam.stream().anyMatch(player -> player.cellId.intValue() == actorCellId)) {
+                            Optional<LolChampSelectChampSelectPlayerSelection> first = session.myTeam.stream()
+                                    .filter(player -> player.cellId.intValue() == actorCellId)
+                                    .findFirst();
+                            if (first.isPresent() && first.get().assignedPosition != null &&
+                                    !first.get().assignedPosition.isBlank()) {
+                                this.allyTeam.put(Position.valueOf(first.get().assignedPosition.toUpperCase(Locale.ROOT)), Champion.getById(((Double) a.get("championId")).intValue()));
+                            }
+                        }
                     }
-                    if (a.get("type").equals("ban") && ((Boolean) a.get("completed"))) {
+                    if (type.equals("ban") && ((Boolean) a.get("completed"))) {
                         int championId = ((Double) a.get("championId")).intValue();
                         if (championId != 0) {
                             banned.add(Champion.getById(championId));
                         }
                     }
-                    else if (a.get("type").equals("ban") &&
-                            ((Double) a.get("actorCellId")).intValue() == self.cellId.intValue() &&
+                    else if (type.equals("ban") &&
+                            actorCellId == self.cellId.intValue() &&
                             !((Boolean) a.get("completed"))) {
                         banAction = a;
                     }
@@ -157,8 +190,8 @@ public class ChampionSelection extends ClientModule {
             if (selection != null && Objects.equals(selection.summonerId, getCurrentSummoner().summonerId)) {
                 //first check locked champion
                 champion = Champion.getById(selection.championId);
-                skinId = selection.selectedSkinId;
-                wardSkinId = selection.wardSkinId;
+                skinId = selection.selectedSkinId == null ? 0 : selection.selectedSkinId;
+                wardSkinId = selection.wardSkinId == null ? 0 : selection.wardSkinId;
                 //if it fails check just selected champion
                 if (champion == null) {
                     champion = Champion.getById(selection.championPickIntent);
@@ -166,6 +199,14 @@ public class ChampionSelection extends ClientModule {
                 //if all fails check list of actions
                 if (champion == null && action != null) {
                     champion = Champion.getById(((Double) action.get("championId")).intValue());
+                }
+                selectedPosition = null;
+                try {
+                    if (selection.assignedPosition != null) {
+                        selectedPosition = Position.valueOf(selection.assignedPosition.toUpperCase(Locale.ROOT));
+                    }
+                } catch (IllegalArgumentException e) {
+                    //ignore
                 }
                 break;
             }
@@ -233,12 +274,52 @@ public class ChampionSelection extends ClientModule {
         }
         else {
             Champion oldChampion = champion;
+            chatRoomName = event.getData().chatDetails.chatRoomName;
             updateGameMode();
             if (gameMode.isDisabled()) {
                 return;
             }
-            findCurrentAction(event.getData());
+            Map<Position, Champion> oldChampions = new HashMap<>(allyTeam);
+            List<Champion> oldEnemyChampions = new ArrayList<>(enemyTeam);
+            processActions(event.getData());
             findSelectedChampion(event.getData());
+            if (isPositionSelector()) {
+                for (LolChampSelectChampSelectPlayerSelection selection : event.getData().myTeam) {
+                    if (selection.assignedPosition != null && Champion.getById(selection.championId) != null) {
+                        allyTeam.put(Position.valueOf(selection.assignedPosition.toUpperCase(Locale.ROOT)), Champion.getById(selection.championId));
+                    }
+                }
+            }
+            boolean teamChanged =
+                    oldChampions.size() != allyTeam.size() || oldEnemyChampions.size() != enemyTeam.size();
+            if (!teamChanged) {
+                for (int i = 0, oldEnemyChampionsSize = oldEnemyChampions.size(); i < oldEnemyChampionsSize; i++) {
+                    Champion oldEnemyChampion = oldEnemyChampions.get(i);
+                    if (oldEnemyChampion != enemyTeam.get(i)) {
+                        teamChanged = true;
+                        break;
+                    }
+                }
+                if (!teamChanged) {
+                    for (Position position : oldChampions.keySet()) {
+                        if (oldChampions.get(position) != allyTeam.get(position)) {
+                            teamChanged = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (isPositionSelector() && selectedPosition != null && (!allyTeam.isEmpty() || !enemyTeam.isEmpty()) &&
+                    teamChanged) {
+                System.out.println("Team changed, analyzing new team");
+                RuneChanger.EXECUTOR_SERVICE.submit(() -> {
+                    try {
+                        teamCompAnalyzer.analyze(selectedPosition, champion, allyTeam, enemyTeam, banned);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                });
+            }
             LolChampSelectChampSelectTimer timer = event.getData().timer;
             if (timer != null) {
                 currentPhase = timer.phase;
@@ -295,27 +376,17 @@ public class ChampionSelection extends ClientModule {
     }
 
     public void sendMessageToChampSelect(String msg) {
+        if (chatRoomName == null) {
+            return;
+        }
+        String name = chatRoomName.substring(0, chatRoomName.indexOf('@'));
+        LolChatConversationMessageResource message = new LolChatConversationMessageResource();
+        message.body = msg;
+        message.type = "chat";
         try {
-            ApiResponse<LolChampSelectChampSelectSession> session = getApi()
-                    .executeGet("/lol-champ-select/v1/session", LolChampSelectChampSelectSession.class);
-            if (!session.isOk()) {
-                return;
-            }
-            String name = session.getResponseObject().chatDetails.chatRoomName;
-            if (name == null) {
-                return;
-            }
-            name = name.substring(0, name.indexOf('@'));
-            LolChatConversationMessageResource message = new LolChatConversationMessageResource();
-            message.body = msg;
-            message.type = "chat";
-            try {
-                getApi().executePost("/lol-chat/v1/conversations/" + name + "/messages", message);
-            } catch (IOException e) {
-                log.error("Exception occurred while sending a message", e);
-            }
+            getApi().executePost("/lol-chat/v1/conversations/" + name + "/messages", message);
         } catch (IOException e) {
-            log.error("Exception occurred while getting a champion selection session", e);
+            log.error("Exception occurred while sending a message", e);
         }
     }
 
@@ -344,11 +415,16 @@ public class ChampionSelection extends ClientModule {
         return positionSelector;
     }
 
+    public Position getSelectedPosition() {
+        return selectedPosition;
+    }
+
     public void clearSession() {
         champion = null;
         action = null;
         positionSelector = false;
         gameMode = null;
+        chatRoomName = null;
     }
 
     public void reset() {
