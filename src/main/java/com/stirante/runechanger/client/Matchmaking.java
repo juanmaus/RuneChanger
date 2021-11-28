@@ -1,6 +1,8 @@
 package com.stirante.runechanger.client;
 
 import com.stirante.eventbus.EventBus;
+import com.stirante.eventbus.AsyncEventExecutor;
+import generated.*;
 import com.stirante.eventbus.Subscribe;
 import com.stirante.lolclient.ClientApi;
 import com.stirante.runechanger.RuneChanger;
@@ -40,6 +42,35 @@ public class Matchmaking extends ClientModule {
                     });
                 } catch (IOException e) {
                     e.printStackTrace();
+                }
+            }
+        }
+    }
+
+    @Subscribe(value = ClientEventListener.MatchmakingSearchStateEvent.NAME, eventExecutor = AsyncEventExecutor.class)
+    public void onMatchmakingSearchState(ClientEventListener.MatchmakingSearchStateEvent event) {
+        if (SimplePreferences.getBooleanValue(SimplePreferences.SettingsKeys.AUTO_ACCEPT, false)) {
+            if (event.getData().searchState == LolLobbyLobbyMatchmakingSearchState.FOUND) {
+                log.info("Found match, waiting 3 seconds and accepting");
+                try {
+                    Thread.sleep(3000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+                try {
+                    LolMatchmakingMatchmakingReadyCheckResource state =
+                            getApi().executeGet("/lol-matchmaking/v1/ready-check", LolMatchmakingMatchmakingReadyCheckResource.class).getResponseObject();
+                    if (state.state == LolMatchmakingMatchmakingReadyCheckState.INPROGRESS
+                            && state.playerResponse != LolMatchmakingMatchmakingReadyCheckResponse.DECLINED &&
+                            state.playerResponse != LolMatchmakingMatchmakingReadyCheckResponse.ACCEPTED) {
+                        log.info("Accepting queue");
+                        getApi().executePost("/lol-matchmaking/v1/ready-check/accept");
+                    }
+                    else {
+                        log.info("Not accepting queue, because player already " + state.playerResponse.name().toLowerCase());
+                    }
+                } catch (IOException e) {
+                    log.error("Exception occurred while autoaccepting", e);
                 }
             }
         }
