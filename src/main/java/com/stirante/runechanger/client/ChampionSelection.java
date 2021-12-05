@@ -271,6 +271,7 @@ public class ChampionSelection extends ClientModule {
         if (event.getEventType() == ClientEventListener.WebSocketEventType.DELETE) {
             clearSession();
             EventBus.publish(ChampionSelectionEndEvent.NAME, new ChampionSelectionEndEvent());
+            EventBus.publish(TeamCompAnalyzer.TeamCompAnalysisEvent.NAME, new TeamCompAnalyzer.TeamCompAnalysisEvent(null));
         }
         else {
             Champion oldChampion = champion;
@@ -309,7 +310,11 @@ public class ChampionSelection extends ClientModule {
                     }
                 }
             }
-            if (isPositionSelector() && selectedPosition != null && (!allyTeam.isEmpty() || !enemyTeam.isEmpty()) &&
+            if (DebugConsts.FORCE_TEAM_COMP_ANALYSIS) {
+                selectedPosition = Position.UTILITY;
+            }
+            if ((isPositionSelector() || DebugConsts.FORCE_TEAM_COMP_ANALYSIS) && selectedPosition != null &&
+                    (!allyTeam.isEmpty() || !enemyTeam.isEmpty()) &&
                     teamChanged) {
                 System.out.println("Team changed, analyzing new team");
                 RuneChanger.EXECUTOR_SERVICE.submit(() -> {
@@ -357,10 +362,12 @@ public class ChampionSelection extends ClientModule {
     }
 
     public void selectChampion(Champion champion) {
-        if (action == null) {
-            return;
-        }
         try {
+            if (action == null) {
+                log.debug("No action to select champion");
+                getApi().executePost("/lol-champ-select/v1/current-champion", champion.getId());
+                return;
+            }
             if (getGameMode() == GameMode.ONEFORALL) {
                 getApi().executePost("/lol-champ-select/v1/current-champion", champion.getId());
             }
@@ -432,20 +439,24 @@ public class ChampionSelection extends ClientModule {
         clearSession();
     }
 
-    public String getLastGrade() {
+    public boolean wasLastGameGood() {
         try {
-            ApiResponse<LolMatchHistoryMatchHistoryPlayerDelta> delta =
-                    getApi().executeGet("/lol-match-history/v1/delta", LolMatchHistoryMatchHistoryPlayerDelta.class);
-            if (!delta.isOk()) {
-                return null;
+            ApiResponse<LolMatchHistoryMatchHistoryList> lastMatch =
+                    getApi().executeGet("/lol-match-history/v1/products/lol/current-summoner/matches", LolMatchHistoryMatchHistoryList.class, "begIndex", "0", "endIndex", "1");
+            if (!lastMatch.isOk() || lastMatch.getResponseObject().games.games.size() > 0) {
+                return false;
             }
-            return delta.getResponseObject().deltas.stream()
-                    .map(gameDelta -> gameDelta.champMastery.grade)
-                    .findFirst()
-                    .orElse(null);
-        } catch (IOException e) {
-            log.error("Exception occurred while getting last grade", e);
-            return null;
+
+            LolMatchHistoryMatchHistoryGame game =
+                    lastMatch.getResponseObject().games.games.get(0);
+            int participantId = game.participantIdentities.stream().filter(pi -> Objects.equals(pi.player.summonerId, getCurrentSummoner().summonerId)).findFirst().orElseThrow().participantId;
+            LolMatchHistoryMatchHistoryParticipant stats =
+                    game.participants.stream().filter(p -> p.participantId == participantId).findFirst().orElseThrow();
+
+            return stats.stats.win && ((stats.stats.kills + stats.stats.assists) / (double) Math.min(1, stats.stats.deaths)) > 2;
+        } catch (Exception e) {
+            log.error("Exception occurred while getting last game", e);
+            return false;
         }
     }
 
